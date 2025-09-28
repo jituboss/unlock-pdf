@@ -14,7 +14,7 @@ app.post('/unlock', upload.single('pdf'), (req, res) => {
   const password = req.body.password;
   const originalName = req.file.originalname;
   const baseName = path.parse(originalName).name;
-  const outputName = `${baseName}_Unlocked.pdf`;
+  const outputName = password === '' ? `${baseName}.pdf` : `${baseName}_Unlocked.pdf`;
 
   const inputPath = req.file.path;
   const outputPath = path.join('uploads', outputName);
