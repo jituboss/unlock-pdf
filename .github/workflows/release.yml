@@ -72,6 +72,12 @@ jobs:
             exit 1
           fi
 
+          # The GitHub release notes come from CHANGELOG.md; fail now, not after publishing.
+          if ! grep -q "^## \[${VERSION}\]" CHANGELOG.md; then
+            echo "::error file=CHANGELOG.md::No '## [${VERSION}]' section in CHANGELOG.md."
+            exit 1
+          fi
+
           # Anything with a hyphen is a semver prerelease: 1.2.0-beta.1 -> channel "beta".
           if [[ "$VERSION" == *-* ]]; then
             PRERELEASE=true
@@ -116,22 +122,41 @@ jobs:
       # End to end: encrypt a PDF, unlock it through the app, confirm the result
       # is decrypted and a wrong password is rejected.
       - name: Smoke test
+        env:
+          # An unusual port, so the test can't silently hit another service on the runner.
+          PORT: '38517'
         run: |
+          URL="http://127.0.0.1:${PORT}"
+          # On failure, surface the server log as an annotation: it's visible
+          # on the run page without downloading the raw logs.
+          fail() {
+            echo "::error title=Smoke test::$1"
+            log=$(cat server.log 2>/dev/null || true)
+            log="${log//'%'/'%25'}"
+            echo "::error title=server.log::${log//$'\n'/'%0A'}"
+            exit 1
+          }
+
+          qpdf --version | head -1
           node server.js > server.log 2>&1 &
-          for i in $(seq 1 20); do curl -sf localhost:3000/ > /dev/null && break; sleep 0.5; done
+          SERVER_PID=$!
+          for _ in $(seq 1 40); do curl -sf "$URL/" > /dev/null && break; sleep 0.25; done
+          kill -0 "$SERVER_PID" 2>/dev/null || fail "server exited during startup"
+          curl -sf "$URL/" | grep -q 'action="/unlock"' || fail "server at $URL is not this app"
 
           qpdf --empty plain.pdf
           qpdf --encrypt secret secret 256 -- plain.pdf locked.pdf
-          qpdf --is-encrypted locked.pdf
+          qpdf --is-encrypted locked.pdf || fail "test fixture is not encrypted"
 
-          code=$(curl -s -o unlocked.pdf -w '%{http_code}' -F pdf=@locked.pdf -F password=secret localhost:3000/unlock)
-          [ "$code" = 200 ] || { echo "::error::unlock returned $code"; cat server.log; exit 1; }
-          if qpdf --is-encrypted unlocked.pdf; then echo "::error::output is still encrypted"; exit 1; fi
+          code=$(curl -s -o unlocked.pdf -w '%{http_code}' -F 'pdf=@locked.pdf;type=application/pdf' -F password=secret "$URL/unlock")
+          [ "$code" = 200 ] || fail "unlock with the right password returned $code, expected 200"
+          if qpdf --is-encrypted unlocked.pdf; then fail "output is still encrypted"; fi
 
-          code=$(curl -s -o /dev/null -w '%{http_code}' -F pdf=@locked.pdf -F password=wrong localhost:3000/unlock)
-          [ "$code" = 422 ] || { echo "::error::wrong password returned $code, expected 422"; exit 1; }
+          code=$(curl -s -o /dev/null -w '%{http_code}' -F 'pdf=@locked.pdf;type=application/pdf' -F password=wrong "$URL/unlock")
+          [ "$code" = 422 ] || fail "unlock with a wrong password returned $code, expected 422"
 
-          [ -z "$(ls uploads)" ] || { echo "::error::temp files left in uploads/"; ls -la uploads; exit 1; }
+          leftovers=$(find uploads -type f)
+          [ -z "$leftovers" ] || fail "temp files left in uploads/: $leftovers"
 
   # Each architecture builds natively on its own runner (QEMU emulation is far
   # slower). Layers go up by digest with no tag; `publish` attaches the names
@@ -254,15 +279,26 @@ jobs:
     permissions:
       contents: write # create the GitHub Release
     steps:
+      - uses: actions/checkout@v4
+
+      # This version's CHANGELOG.md section, plus the pull command.
       - name: Release notes
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
+          awk -v v="$VERSION" '
+            /^## \[/ { p = (index($0, "[" v "]") > 0); next }
+            p
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          [ -s RELEASE_NOTES.md ] || { echo "::error::Empty CHANGELOG.md section for $VERSION"; exit 1; }
           {
+            echo ""
             echo "## Container image"
             echo ""
             echo '```'
-            echo "docker pull ${IMAGE}:${{ needs.meta.outputs.version }}"
+            echo "docker pull ${IMAGE}:${VERSION}"
             echo '```'
-          } > RELEASE_NOTES.md
+          } >> RELEASE_NOTES.md
 
       - name: Create the GitHub release
         uses: softprops/action-gh-release@v2
@@ -280,4 +316,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: actionlint
-        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+        # Errors are emitted as annotations so they show on the run page.
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 \
+            -format '{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}}::{{$err.Message}}\n{{end}}'

@@ -7,6 +7,7 @@ const fs = require('fs');
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+const PORT = Number(process.env.PORT) || 3000;
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -53,11 +54,12 @@ app.post('/unlock', upload.single('pdf'), (req, res) => {
     'qpdf',
     [`--password=${password}`, '--decrypt', '--', inputPath, outputPath],
     { timeout: 30_000 },
-    (err) => {
+    (err, stdout, stderr) => {
       // qpdf exit code 3 = succeeded with warnings.
       if (err && err.code !== 3) {
         // Don't log err itself: it contains the command line, including the password.
-        console.error('Failed to unlock PDF (qpdf exit code %s)', err.code);
+        // qpdf's stderr names files and the problem, never the password.
+        console.error('Failed to unlock PDF (qpdf exit code %s): %s', err.code, String(stderr).trim());
         removeQuietly(inputPath);
         removeQuietly(outputPath);
         return res.status(422).send('Failed to unlock PDF. Wrong password?');
@@ -82,4 +84,4 @@ app.use((err, req, res, next) => {
   res.status(500).send('Internal server error.');
 });
 
-app.listen(3000, () => console.log('Server running on http://localhost:3000'));
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));

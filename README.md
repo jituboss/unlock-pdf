@@ -68,9 +68,14 @@ Pushing a `v*` tag builds a multi-arch image (amd64 + arm64) and pushes it to
 [Docker Hub](https://hub.docker.com/r/jituboss/pdf-unlock) via GitHub Actions
 (`.github/workflows/release.yml`). Pushes to `master` and pull requests only run the checks (dependency audit, an end-to-end unlock test, and image builds).
 
+1. Add a `## [X.Y.Z] - YYYY-MM-DD` section to [CHANGELOG.md](CHANGELOG.md). It becomes the
+   GitHub release notes, and the pipeline refuses a tag without one.
+2. Bump, push, and once the checks on `master` pass, push the tag:
+
 ```bash
-npm version patch          # or minor / major; bumps package.json and creates tag vX.Y.Z
-git push origin master --follow-tags
+npm version minor          # or patch / major; bumps package.json, commits, tags vX.Y.Z
+git push origin master
+git push origin vX.Y.Z     # push the tag on its own; this is what publishes
 ```
 
 Tags published: `X.Y.Z`, `X.Y`, `X`, `latest`. A prerelease such as `1.2.0-beta.1`
