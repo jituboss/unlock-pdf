@@ -7,10 +7,20 @@ All notable changes to this project are documented here. The format follows
 The release pipeline publishes each version's section below as its GitHub
 release notes, so add a `## [x.y.z] - YYYY-MM-DD` section before tagging.
 
-## [1.2.0] - 2026-11-12
+## [1.2.1] - 2026-11-12
 
 First version published to Docker Hub by the release pipeline. It includes
-all the 1.1.0 changes below.
+all the 1.2.0 and 1.1.0 changes below.
+
+### Fixed
+- Release pipeline: a tag pushed without the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`
+  repository secrets now fails in the first job with a message saying what to add,
+  instead of after the checks and builds.
+
+## [1.2.0] - 2026-11-12
+
+Tagged but never published: Docker Hub credentials weren't configured in the
+repository. Use 1.2.1.
 
 ### Fixed
 - Unlocking failed with "Permission denied" on Ubuntu hosts with AppArmor (e.g. Ubuntu 26.04):
