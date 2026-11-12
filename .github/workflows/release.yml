@@ -1,0 +1,283 @@
+name: Release
+
+# One pipeline. It gates every push and pull request; only a tag publishes.
+#
+#   pull_request        verify + build both arches, push nothing
+#   push to main        the same: a gate, not a release
+#   push a `v*` tag     ... then push the image to Docker Hub and open a GitHub release
+#
+# Cut a release with `npm version <patch|minor|major>` (bumps package.json,
+# commits, tags vX.Y.Z), then `git push origin main --follow-tags`.
+# Only the tag's run publishes; the branch's run is just the gate.
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel a run that is mid-publish; superseding a branch build is fine.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  IMAGE: jituboss/pdf-unlock
+
+jobs:
+  # Fails in seconds if the tag disagrees with package.json, before anything builds.
+  meta:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      channel: ${{ steps.v.outputs.channel }}
+      release: ${{ steps.v.outputs.release }}
+      publish: ${{ steps.v.outputs.publish }}
+      build_date: ${{ steps.v.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+
+          {
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if [[ "$GITHUB_REF" == refs/tags/v* && "${{ github.event_name }}" == "push" ]]; then
+              echo "publish=true"
+            else
+              echo "publish=false"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            {
+              echo "release=false"
+              echo "version=${PKG}+${GITHUB_SHA::7}"
+              echo "prerelease=false"
+              echo "channel=none"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG" != "$VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json ($PKG)."
+            exit 1
+          fi
+
+          # Anything with a hyphen is a semver prerelease: 1.2.0-beta.1 -> channel "beta".
+          if [[ "$VERSION" == *-* ]]; then
+            PRERELEASE=true
+            CHANNEL="${VERSION#*-}"
+            CHANNEL="${CHANNEL%%.*}"
+          else
+            PRERELEASE=false
+            CHANNEL=stable
+          fi
+
+          {
+            echo "release=true"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+            echo "channel=$CHANNEL"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Audit + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: meta
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Dependency audit
+        run: npm audit --audit-level moderate
+
+      - name: Syntax check
+        run: node --check server.js
+
+      - name: Install qpdf
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qpdf
+
+      # End to end: encrypt a PDF, unlock it through the app, confirm the result
+      # is decrypted and a wrong password is rejected.
+      - name: Smoke test
+        run: |
+          node server.js > server.log 2>&1 &
+          for i in $(seq 1 20); do curl -sf localhost:3000/ > /dev/null && break; sleep 0.5; done
+
+          qpdf --empty plain.pdf
+          qpdf --encrypt secret secret 256 -- plain.pdf locked.pdf
+          qpdf --is-encrypted locked.pdf
+
+          code=$(curl -s -o unlocked.pdf -w '%{http_code}' -F pdf=@locked.pdf -F password=secret localhost:3000/unlock)
+          [ "$code" = 200 ] || { echo "::error::unlock returned $code"; cat server.log; exit 1; }
+          if qpdf --is-encrypted unlocked.pdf; then echo "::error::output is still encrypted"; exit 1; fi
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' -F pdf=@locked.pdf -F password=wrong localhost:3000/unlock)
+          [ "$code" = 422 ] || { echo "::error::wrong password returned $code, expected 422"; exit 1; }
+
+          [ -z "$(ls uploads)" ] || { echo "::error::temp files left in uploads/"; ls -la uploads; exit 1; }
+
+  # Each architecture builds natively on its own runner (QEMU emulation is far
+  # slower). Layers go up by digest with no tag; `publish` attaches the names
+  # only after `verify` is green.
+  build:
+    name: Image (${{ matrix.arch }})
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        if: needs.meta.outputs.publish == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            APP_VERSION=${{ needs.meta.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ needs.meta.outputs.build_date }}
+          # A branch or pull request only has to prove the image still builds.
+          outputs: >-
+            ${{ needs.meta.outputs.publish == 'true'
+              && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE)
+              || 'type=cacheonly' }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Export the digest
+        if: needs.meta.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        if: needs.meta.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish to Docker Hub
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [meta, verify, build]
+    if: needs.meta.outputs.publish == 'true'
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # `latest` never points at a prerelease. A prerelease gets its exact
+      # version plus a moving channel tag (e.g. `beta`) instead.
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ needs.meta.outputs.prerelease == 'false' }}
+            type=semver,pattern={{major}},enable=${{ needs.meta.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.meta.outputs.prerelease == 'false' }}
+            type=raw,value=${{ needs.meta.outputs.channel }},enable=${{ needs.meta.outputs.prerelease == 'true' }}
+
+      # One multi-arch manifest over the two digests, published under every tag at once.
+      - name: Create the manifest
+        working-directory: /tmp/digests
+        run: |
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Inspect
+        run: |
+          docker buildx imagetools inspect \
+            "$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+
+  release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [meta, publish]
+    if: needs.meta.outputs.release == 'true'
+    permissions:
+      contents: write # create the GitHub Release
+    steps:
+      - name: Release notes
+        run: |
+          {
+            echo "## Container image"
+            echo ""
+            echo '```'
+            echo "docker pull ${IMAGE}:${{ needs.meta.outputs.version }}"
+            echo '```'
+          } > RELEASE_NOTES.md
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+
+  # Catches a workflow file that would otherwise fail with zero jobs.
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
