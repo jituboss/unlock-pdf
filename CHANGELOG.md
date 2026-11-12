@@ -13,6 +13,9 @@ First version published to Docker Hub by the release pipeline. It includes
 all the 1.1.0 changes below.
 
 ### Fixed
+- Unlocking failed with "Permission denied" on Ubuntu hosts with AppArmor (e.g. Ubuntu 26.04):
+  Ubuntu's `qpdf` profile only opens files ending in `.pdf`, and uploads were saved without an
+  extension. Temp uploads now get a random `.pdf` name.
 - Release pipeline: the workflow lint failed on an unused loop variable (ShellCheck SC2034).
 - Release pipeline: the smoke test now runs the server on its own port and checks
   that it is talking to this app before testing unlocks.

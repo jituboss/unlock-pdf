@@ -14,8 +14,15 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const app = express();
 app.disable('x-powered-by');
 
+const randomPdfName = () => `${crypto.randomBytes(16).toString('hex')}.pdf`;
+
 const upload = multer({
-  dest: UPLOAD_DIR,
+  // Random name with a .pdf extension: Ubuntu's AppArmor profile for qpdf
+  // only lets it open files ending in .pdf/.json/.qdf.
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename: (req, file, cb) => cb(null, randomPdfName()),
+  }),
   limits: { fileSize: MAX_FILE_SIZE, files: 1, fields: 5, fieldSize: 1024 },
   fileFilter: (req, file, cb) => {
     const isPdf =
@@ -47,7 +54,7 @@ app.post('/unlock', upload.single('pdf'), (req, res) => {
 
   const inputPath = req.file.path;
   // Server-generated output name: never derived from user input.
-  const outputPath = path.join(UPLOAD_DIR, `${crypto.randomBytes(16).toString('hex')}.pdf`);
+  const outputPath = path.join(UPLOAD_DIR, randomPdfName());
 
   // execFile (no shell) so the password and paths can't inject commands.
   execFile(
