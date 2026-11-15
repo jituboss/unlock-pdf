@@ -25,8 +25,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY server.js ./
 COPY public ./public
 
-# Run as non-root
-RUN mkdir uploads && chown node:node uploads
+# Run as non-root. Temp files go to /tmp/unlock-pdf (see UPLOAD_DIR in server.js).
 USER node
 
 EXPOSE 3000

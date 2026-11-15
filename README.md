@@ -34,7 +34,7 @@ unlock-pdf/
 ├── package-lock.json
 ├── public/
 │   └── index.html
-├── uploads/             # temp files, created at runtime, git-ignored
+├── uploads/             # only if you set UPLOAD_DIR=uploads (default temp dir: /tmp/unlock-pdf)
 └── README.md
 ```
 

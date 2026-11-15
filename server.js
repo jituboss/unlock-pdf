@@ -4,12 +4,48 @@ const { execFile } = require('child_process');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
+// Temp files live in the container's own /tmp by default: it is always writable by the
+// non-root user, and nothing needs to survive a restart (every file is deleted right
+// after the download). A mounted volume at ./uploads used to be created root-owned
+// (e.g. by TrueNAS or Docker named volumes) and broke every upload with EACCES.
+// Set UPLOAD_DIR to use another location; it must be writable by the container user.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(os.tmpdir(), 'unlock-pdf');
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 const PORT = Number(process.env.PORT) || 3000;
+const STALE_MS = 30 * 60 * 1000; // leftovers (e.g. a crash mid-request) older than this are swept
 
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true, mode: 0o700 });
+  // Fail fast with a clear message instead of failing every request later.
+  const probe = path.join(UPLOAD_DIR, `.probe-${process.pid}`);
+  fs.writeFileSync(probe, '');
+  fs.rmSync(probe, { force: true });
+} catch (err) {
+  console.error(
+    'Upload directory %s is not writable by uid %s: %s. Fix its ownership or set UPLOAD_DIR.',
+    UPLOAD_DIR,
+    typeof process.getuid === 'function' ? process.getuid() : '?',
+    err.message
+  );
+  process.exit(1);
+}
+
+// Remove stale temp files at startup and every 10 minutes.
+const sweepStale = () =>
+  fs.readdir(UPLOAD_DIR, (err, names) => {
+    if (err) return;
+    const cutoff = Date.now() - STALE_MS;
+    names.forEach((name) => {
+      const p = path.join(UPLOAD_DIR, name);
+      fs.stat(p, (e, st) => {
+        if (!e && st.isFile() && st.mtimeMs < cutoff) fs.rm(p, { force: true }, () => {});
+      });
+    });
+  });
+sweepStale();
+setInterval(sweepStale, 10 * 60 * 1000).unref();
 
 const app = express();
 app.disable('x-powered-by');

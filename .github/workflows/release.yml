@@ -136,6 +136,7 @@ jobs:
         env:
           # An unusual port, so the test can't silently hit another service on the runner.
           PORT: '38517'
+          UPLOAD_DIR: uploads
         run: |
           URL="http://127.0.0.1:${PORT}"
           # On failure, surface the server log as an annotation: it's visible
@@ -168,6 +169,14 @@ jobs:
 
           leftovers=$(find uploads -type f)
           [ -z "$leftovers" ] || fail "temp files left in uploads/: $leftovers"
+
+          # An unwritable upload dir (e.g. a root-owned volume, the TrueNAS "EACCES" bug) must stop
+          # the server at startup with a clear message, not fail every request later.
+          mkdir ro-uploads && chmod 555 ro-uploads
+          if UPLOAD_DIR=ro-uploads PORT=38518 node server.js > ro.log 2>&1; then
+            fail "server started with an unwritable UPLOAD_DIR"
+          fi
+          grep -q "not writable" ro.log || fail "no clear 'not writable' message: $(cat ro.log)"
 
   # Each architecture builds natively on its own runner (QEMU emulation is far
   # slower). Layers go up by digest with no tag; `publish` attaches the names

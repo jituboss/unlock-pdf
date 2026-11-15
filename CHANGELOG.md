@@ -7,6 +7,24 @@ All notable changes to this project are documented here. The format follows
 The release pipeline publishes each version's section below as its GitHub
 release notes, so add a `## [x.y.z] - YYYY-MM-DD` section before tagging.
 
+## [1.2.2] - 2026-11-15
+
+### Fixed
+- Every unlock failed with `EACCES: permission denied, open '/app/uploads/…pdf'` when `/app/uploads`
+  was a mounted volume. Docker named volumes (as created by TrueNAS and other hosts) are root-owned,
+  and the container runs as the non-root `node` user, so it could not write there. Temp files now
+  go to the container's own `/tmp/unlock-pdf`, which is always writable and needs no volume.
+- Leftover temp files (for example after a crash mid-request) are swept at startup and every
+  10 minutes, so uploaded PDFs can't accumulate on disk.
+
+### Added
+- `UPLOAD_DIR` environment variable to choose another temp location. If it isn't writable the
+  server now exits at startup with a clear message instead of failing every request.
+- Release pipeline: a regression test that an unwritable `UPLOAD_DIR` stops the server at startup.
+
+### Changed
+- The image no longer creates `/app/uploads`; a volume mounted there is simply unused.
+
 ## [1.2.1] - 2026-11-12
 
 First version published to Docker Hub by the release pipeline. It includes
